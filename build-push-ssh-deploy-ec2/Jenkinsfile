@@ -1,0 +1,85 @@
+pipeline {
+    agent any
+    
+    environment {
+        Dockerhub_Repo_Name = "Enter Your DcokerHub Repo"
+        Version_prefix = "0.8"                                          // CHange Version prefix if you want to start from 1.0
+        Build_version = "${Version_prefix}.${env.BUILD_NUMBER}"
+        ImageName = "${Dockerhub_Repo_Name}:${Build_version}"
+        Docker_login = "Your dockerhub ID from credentials manager"     // Call your credentials from jenkins credentials manager
+        SSH_login = 'Your ec2-ssh-id ID from credentials manager'
+        Container_name = 'Container name?'
+        User_Name = "ubuntu"
+        Ec2_Ip = "Enter Your Ec2-Public IP"
+    }
+    
+    stages {
+        stage("Building Image") {
+            steps {
+                script {
+                    def userInput = input message: 'Do you want to proceed with building the Docker image?', ok: 'Yes', parameters: [booleanParam(defaultValue: true, description: 'Proceed with building the Docker image?', name: 'Proceed')]
+                    
+                    if (!userInput) {
+                        error 'Build aborted by the user.'
+                    }
+                    
+                    def dockerImage = docker.build(ImageName)
+                    echo "Built Docker Image :${ImageName}"
+                }
+            }
+        }
+
+        stage("Pushing Image to DockerHub") {
+            steps {
+                script {
+                    if (currentBuild.currentResult == 'SUCCESS') {
+                        docker.withRegistry('', Docker_login) {
+                            def dockerImage = docker.image(ImageName)
+                            dockerImage.push()
+                        }
+                        echo "Image Pushed"
+                    } else {
+                        error 'Build is not successful. Skipping Docker image push.'
+                    }
+                }
+            }
+        }
+
+        stage('Connecting to AWS EC2 & Executing Script') {
+            steps {
+                script {
+                    if (currentBuild.currentResult == 'SUCCESS') {
+                        sshagent(["${SSH_login}"]) {
+                            withCredentials([usernamePassword(credentialsId: 'dockerhub_id', passwordVariable: 'DockerPass', usernameVariable: 'DockerUsername')]) {
+                                sh '''
+                                ssh -o StrictHostKeyChecking=no ${User_Name}@${Ec2_Ip} << EOF
+                                set -e
+                                echo \$DockerPass | docker login -u \$DockerUsername --password-stdin
+                                docker pull ${ImageName}
+                                
+                                if docker ps -a -q -f name=${Container_name} ; then
+                                    echo "Container with Image ${Container_name} Exists"
+                                    docker rm -f ${Container_name}
+                                    echo "Stopped and removed the Existing Container"
+
+                                else
+                                    echo "Container with Image ${Container_name} doesnt Exists" 
+                                fi
+                                    docker run -d --name ${Container_name} --restart always -p 80:4000 ${ImageName}
+                                    echo "Starting the new Container with the Updated Image"
+                            
+                                docker logout
+
+
+EOF
+                                '''
+                            }
+                        }
+                    } else {
+                        error 'Build failed, skipping SSH connection.'
+                    }
+                }
+            }
+        }
+    }
+}
